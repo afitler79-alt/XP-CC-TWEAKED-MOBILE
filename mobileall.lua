@@ -1010,14 +1010,20 @@ local function centered(x, y, width, value, fg, bg)
   ui.text(left, y, value, fg, bg, width)
 end
 
+local function dimensionName(world)
+  local dimension = tostring(world.dimension or "--")
+  local names = {
+    ["minecraft:overworld"] = "Overworld",
+    ["minecraft:the_nether"] = "Nether",
+    ["minecraft:the_end"] = "The End",
+  }
+  return names[dimension] or dimension
+end
+
 local function weatherLine(world, width)
   local place = tostring(world.biome or "--")
   local weather = tostring(world.weather or "--")
-  local dimension = tostring(world.dimension or "--")
-  if width < 22 then
-    return compact(place .. " / " .. weather, width)
-  end
-  return compact(place .. "  |  " .. dimension .. "  |  " .. weather, width)
+  return compact(place .. " / " .. weather, width)
 end
 
 function M.draw(ctx)
@@ -1029,16 +1035,18 @@ function M.draw(ctx)
   ui.text(2, 2, "Pocket PC", colors.white, colors.lightBlue)
   ui.text(math.max(1, w - 12), 2, "Luna Mobile", colors.white, colors.lightBlue, 13)
 
-  ui.fill(2, 3, math.max(1, w - 2), 3, colors.cyan)
+  ui.fill(2, 3, math.max(1, w - 2), 4, colors.cyan)
   ui.fill(2, 3, math.max(1, w - 2), 1, colors.blue)
   ui.text(3, 3, "MI MUNDO", colors.white, colors.blue)
-  ui.text(3, 4, weatherLine(world, w - 4), colors.white, colors.cyan, w - 4)
+  ui.text(3, 4, compact("Dimension: " .. dimensionName(world), w - 4),
+    colors.white, colors.cyan, w - 4)
+  ui.text(3, 5, weatherLine(world, w - 4), colors.white, colors.cyan, w - 4)
   local moonTime = "Luna " .. tostring(world.moon or "--") .. "  |  " .. tostring(world.worldTime or "--")
-  ui.text(3, 5, compact(moonTime, w - 4), colors.white, colors.cyan, w - 4)
+  ui.text(3, 6, compact(moonTime, w - 4), colors.white, colors.cyan, w - 4)
 
-  ui.fill(1, 6, w, 1, colors.green)
-  ui.text(2, 6, os.date("%A, %d %B"), colors.white, colors.green, w - 2)
-  ui.text(math.max(1, w - 7), 6, "XP", colors.white, colors.green, 2)
+  ui.fill(1, 7, w, 1, colors.green)
+  ui.text(2, 7, os.date("%A, %d %B"), colors.white, colors.green, w - 2)
+  ui.text(math.max(1, w - 7), 7, "XP", colors.white, colors.green, 2)
 
   local columns = w < 22 and 2 or 3
   local cell = math.max(1, math.floor((w - 2) / columns))
