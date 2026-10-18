@@ -300,27 +300,27 @@ local function render(ctx)
     local x, y = 1, math.max(2, h - 8)
     local panelWidth = math.min(w, 28)
     local columnWidth = math.max(1, math.floor(panelWidth / 2))
-    ui.fill(x, y, panelWidth, 7, colors.lightGray)
+    ui.fill(x, y, panelWidth, 8, colors.lightGray)
     ui.fill(x, y, panelWidth, 1, colors.blue)
     ui.text(x + 1, y, "Programas", colors.white, colors.blue, panelWidth - 2)
     if x + panelWidth <= w then
-      ui.fill(x + panelWidth, y + 1, 1, 6, colors.gray)
+      ui.fill(x + panelWidth, y + 1, 1, 7, colors.gray)
     end
-    if y + 7 < h then
-      ui.fill(x + 1, y + 7, panelWidth, 1, colors.gray)
+    if y + 8 < h then
+      ui.fill(x + 1, y + 8, panelWidth, 1, colors.gray)
     end
     local pages = {
       {
         { "IE Mobile", "Radar", "Messenger", "Create", "GPS" },
-        { "Archivos", "Ajustes", "Pocket CMD", "Geo Scanner", "Split" },
+        { "Archivos", "Ajustes", "Pocket CMD", "Geo Scanner", "Split", "Mapa" },
       },
       {
         { "Calculadora", "Notas", "Reloj", "Redstone", "Inventario" },
-        { "Media", "Inicio", "Apagar", "YouTube", "Mapa" },
+        { "Media", "Inicio", "Apagar", "YouTube", "" },
       },
     }
     local entries = pages[ctx.menuPage or 1]
-    for row = 1, 5 do
+    for row = 1, 6 do
       local rowY = y + row
       for column = 1, 2 do
         local label = entries[column][row]
@@ -332,7 +332,7 @@ local function render(ctx)
         end
       end
     end
-    local footerY = y + 6
+    local footerY = y + 7
     ui.text(x + 1, footerY, ctx.menuPage == 2 and "< Apps 2/2" or "Apps 1/2 >",
       colors.blue, colors.lightGray, panelWidth - 2)
   end
@@ -350,22 +350,22 @@ local function isTouch(event, x, y, ctx)
       return true
     end
     local menuTop = math.max(2, h - 8)
-    if x >= 1 and x <= math.min(w, 28) and y == menuTop + 6 then
+    if x >= 1 and x <= math.min(w, 28) and y == menuTop + 7 then
       ctx.menuPage = ctx.menuPage == 2 and 1 or 2
       return true
     end
-    if x >= 1 and x <= math.min(w, 28) and y > menuTop and y <= menuTop + 5 then
+    if x >= 1 and x <= math.min(w, 28) and y > menuTop and y <= menuTop + 6 then
       local columnWidth = math.max(1, math.floor(math.min(w, 28) / 2))
       local column = x > columnWidth and 2 or 1
       local row = y - menuTop
       local pages = {
         {
           { "ie", "radar", "messenger", "create", "gps" },
-          { "explorer", "settings", "cmd", "ores", "split" },
+          { "explorer", "settings", "cmd", "ores", "split", "map" },
         },
         {
           { "calculator", "notes", "clock", "redstone", "inventory" },
-          { "media", "home", "shutdown", "youtube", "map" },
+          { "media", "home", "shutdown", "youtube", "" },
         },
       }
       local action = pages[ctx.menuPage or 1][column][row]
@@ -2526,6 +2526,7 @@ function M.touch(ctx, x, y)
 end
 
 return M
+]],
   ['apps/map.lua'] = [[local ui = require("sys.mobile.ui")
 local lib = require("sys.mobile.lib")
 local M = { title = "Google Maps Pocket" }
