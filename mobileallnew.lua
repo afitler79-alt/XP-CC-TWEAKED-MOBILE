@@ -2536,14 +2536,16 @@ local MAX_POINTS = 400
 local SCALES = { 1, 4, 16, 64 }
 local state = {
   x = nil,
-  y = nil,
   z = nil,
+  centerX = 0,
+  centerZ = 0,
   dimension = "--",
   points = {},
   destination = nil,
   zoom = 2,
-  nextUpdate = 0,
-  message = "Pulsa GPS para centrar el mapa.",
+  dragX = nil,
+  dragY = nil,
+  message = "Sin GPS: centra el mapa e introduce X Z manualmente.",
 }
 
 local function save()
@@ -2556,6 +2558,10 @@ local function save()
     destination = state.destination,
     zoom = state.zoom,
     dimension = state.dimension,
+    x = state.x,
+    z = state.z,
+    centerX = state.centerX,
+    centerZ = state.centerZ,
   }))
   file.close()
   return true
@@ -2587,6 +2593,16 @@ local function load()
   end
   if type(data.zoom) == "number" and SCALES[data.zoom] then state.zoom = data.zoom end
   if type(data.dimension) == "string" then state.dimension = data.dimension end
+  if type(data.centerX) == "number" and type(data.centerZ) == "number" then
+    state.centerX, state.centerZ = data.centerX, data.centerZ
+  end
+  if type(data.x) == "number" then state.x = data.x end
+  if type(data.z) == "number" then state.z = data.z end
+  if data.centerX == nil and #state.points > 0 then
+    local last = state.points[#state.points]
+    state.centerX, state.centerZ = last.x, last.z
+    state.x, state.z = last.x, last.z
+  end
 end
 
 local function recordPosition(x, z)
@@ -2600,41 +2616,32 @@ local function recordPosition(x, z)
   return false
 end
 
-local function locate(ctx, timeout)
-  state.nextUpdate = os.clock() + 5
-  if not gps or type(gps.locate) ~= "function" then
-    state.message = "La API GPS no está disponible."
-    return
+local function parseCoordinates(value)
+  local x, z = tostring(value or ""):match("^%s*(-?[%d%.]+)%s*[, ]%s*(-?[%d%.]+)%s*$")
+  x, z = tonumber(x), tonumber(z)
+  if not x or not z or x ~= x or z ~= z
+    or x == math.huge or x == -math.huge or z == math.huge or z == -math.huge then
+    return nil
   end
-  state.message = "Buscando señal GPS..."
-  local ok, x, y, z = pcall(gps.locate, timeout or 3, false)
-  if not ok then
-    state.message = "Error GPS: " .. tostring(x)
-    return
-  end
-  if type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" then
-    state.message = "Sin señal: configura 4 hosts GPS con modem."
-    return
-  end
+  return x, z
+end
 
-  local dimension = tostring((ctx.world and ctx.world.dimension) or "--")
-  local changedDimension = state.dimension ~= "--" and dimension ~= "--"
-    and state.dimension ~= dimension
-  if changedDimension then
-    state.points = {}
-    state.destination = nil
-    state.message = "Cambió la dimensión; historial del mapa reiniciado."
-  else
-    state.message = "Mapa centrado en tu posición."
+local function setCenter(ctx)
+  local initial = state.x and (tostring(state.x) .. " " .. tostring(state.z))
+    or (tostring(state.centerX) .. " " .. tostring(state.centerZ))
+  local value = lib.prompt(ctx, "Posicion X Z (ej. 120 -45):", initial)
+  if value == nil or value == "" then return end
+  local x, z = parseCoordinates(value)
+  if not x then
+    state.message = "Coordenadas no validas. Escribe X Z."
+    return
   end
-  state.x, state.y, state.z = x, y, z
-  state.dimension = dimension
-  local changedPosition = recordPosition(x, z)
-  if changedPosition or changedDimension then
-    local saved, err = save()
-    if not saved then state.message = "No se guardó el mapa: " .. tostring(err) end
-  end
-  state.nextUpdate = os.clock() + 5
+  state.x, state.z = x, z
+  state.centerX, state.centerZ = x, z
+  recordPosition(x, z)
+  state.message = "Mapa centrado en X " .. math.floor(x) .. " Z " .. math.floor(z) .. "."
+  local saved, err = save()
+  if not saved then state.message = "No se guardo el mapa: " .. tostring(err) end
 end
 
 local function setDestination(ctx)
@@ -2646,10 +2653,9 @@ local function setDestination(ctx)
     state.destination = nil
     state.message = "Destino borrado."
   else
-    local x, z = value:match("^%s*(-?[%d%.]+)%s*[, ]%s*(-?[%d%.]+)%s*$")
-    x, z = tonumber(x), tonumber(z)
-    if not x or not z then
-      state.message = "Coordenadas no válidas. Escribe X Z."
+    local x, z = parseCoordinates(value)
+    if not x then
+      state.message = "Coordenadas no validas. Escribe X Z."
       return
     end
     state.destination = { x = x, z = z }
@@ -2670,11 +2676,11 @@ end
 
 local function controls(width)
   if width < 22 then
-    return { gpsX = 2, gpsWidth = 5, minusX = 8, plusX = 11, zoomWidth = 2,
+    return { centerX = 2, centerWidth = 5, minusX = 8, plusX = 11, zoomWidth = 2,
       destinationX = 14, destinationWidth = math.max(1, width - 14) }
   end
-  return { gpsX = 2, gpsWidth = 6, minusX = 9, plusX = 13, zoomWidth = 3,
-    destinationX = 17, destinationWidth = math.min(9, width - 16) }
+  return { centerX = 2, centerWidth = 7, minusX = 10, plusX = 14, zoomWidth = 3,
+    destinationX = 18, destinationWidth = math.min(8, width - 17) }
 end
 
 local function drawMap(width, top, bottom)
@@ -2691,9 +2697,8 @@ local function drawMap(width, top, bottom)
     end
 
     local function plot(x, z, marker)
-      if not state.x then return end
-      local column = centerColumn + math.floor((x - state.x) / scale + 0.5)
-      local row = centerRow + math.floor((z - state.z) / scale + 0.5)
+      local column = centerColumn + math.floor((x - state.centerX) / scale + 0.5)
+      local row = centerRow + math.floor((z - state.centerZ) / scale + 0.5)
       if column >= 1 and column <= mapWidth and row >= 1 and row <= mapHeight then
         line[column] = marker
       end
@@ -2701,7 +2706,7 @@ local function drawMap(width, top, bottom)
 
     for _, point in ipairs(state.points) do plot(point.x, point.z, "o") end
     if state.destination then plot(state.destination.x, state.destination.z, "X") end
-    if state.x then plot(state.x, state.z, "@") end
+    if state.x and state.z then plot(state.x, state.z, "@") end
 
     term.setCursorPos(3, top + row - 1)
     for column = 1, mapWidth do
@@ -2729,62 +2734,65 @@ local function drawMap(width, top, bottom)
 end
 
 function M.open(ctx)
-  state.x, state.y, state.z = nil, nil, nil
+  state.x, state.z = nil, nil
+  state.centerX, state.centerZ = 0, 0
   state.points = {}
   state.destination = nil
   state.zoom = 2
   state.dimension = "--"
+  state.dragX, state.dragY = nil, nil
   load()
   if state.dimension == "--" and ctx.world then
     state.dimension = tostring(ctx.world.dimension or "--")
   end
-  state.nextUpdate = os.clock() + 2
-end
-
-function M.tick(ctx)
-  if os.clock() >= state.nextUpdate then locate(ctx, 1) end
+  if #state.points == 0 then
+    state.message = "Sin GPS: pulsa Centro e introduce coordenadas X Z."
+  end
 end
 
 function M.draw(ctx)
   local width, height = term.getSize()
   local layout = controls(width)
-  ui.button(layout.gpsX, 3, layout.gpsWidth, "GPS", colors.green, colors.black)
+  ui.button(layout.centerX, 3, layout.centerWidth,
+    width < 22 and "Coord" or "Centro", colors.green, colors.black)
   ui.button(layout.minusX, 3, layout.zoomWidth, "-", colors.lightBlue)
   ui.button(layout.plusX, 3, layout.zoomWidth, "+", colors.lightBlue)
   ui.button(layout.destinationX, 3, layout.destinationWidth,
-    width < 22 and "Dst" or "Destino", colors.blue)
+    width < 22 and "Dst" or (layout.destinationWidth < 7 and "Dest." or "Destino"), colors.blue)
 
   local mapTop = 5
   local footer = height - 3
-  ui.text(2, 4, "N ^ " .. state.dimension:gsub("^minecraft:", ""),
+  ui.text(2, 4, "N ^ " .. state.dimension:gsub("^minecraft:", "")
+    .. " X" .. math.floor(state.centerX) .. " Z" .. math.floor(state.centerZ),
     colors.blue, colors.white, width - 2)
   drawMap(width, mapTop, math.max(mapTop, footer - 1))
 
-  if state.x then
-    ui.text(2, footer, string.format("X %.0f Y %.0f Z %.0f  1:%d",
-      state.x, state.y, state.z, SCALES[state.zoom]), colors.black, colors.white, width - 2)
-  else
-    ui.text(2, footer, "Sin posicion GPS  |  1:" .. SCALES[state.zoom],
-      colors.gray, colors.white, width - 2)
-  end
-  if state.destination and state.x then
+  ui.text(2, footer, state.x and state.z
+    and string.format("@ X %.0f Z %.0f  1:%d", state.x, state.z, SCALES[state.zoom])
+    or string.format("Centro X %.0f Z %.0f  1:%d",
+      state.centerX, state.centerZ, SCALES[state.zoom]),
+    colors.black, colors.white, width - 2)
+  if state.destination and state.x and state.z then
     local dx, dz = state.destination.x - state.x, state.destination.z - state.z
     local distance = math.floor(math.sqrt(dx * dx + dz * dz) + 0.5)
     ui.text(2, footer + 1, "Destino: " .. distance .. "m " .. direction(dx, dz),
       colors.red, colors.white, width - 2)
     ui.text(2, footer + 2, state.message, colors.gray, colors.white, width - 2)
+  elseif state.destination then
+    ui.text(2, footer + 1, "Destino X " .. math.floor(state.destination.x)
+      .. " Z " .. math.floor(state.destination.z), colors.red, colors.white, width - 2)
+    ui.text(2, footer + 2, state.message, colors.gray, colors.white, width - 2)
   else
-    ui.text(2, footer + 1, state.message, colors.gray, colors.white, width - 2)
+    ui.text(2, footer + 1, "Toca el mapa para desplazarlo.", colors.gray, colors.white, width - 2)
   end
 end
 
 function M.touch(ctx, x, y)
-  local width = term.getSize()
+  local width, height = term.getSize()
   if y == 3 then
     local layout = controls(width)
-    if x >= layout.gpsX and x < layout.gpsX + layout.gpsWidth then
-      locate(ctx)
-      if state.x and ctx.playSound then ctx.playSound("action") end
+    if x >= layout.centerX and x < layout.centerX + layout.centerWidth then
+      setCenter(ctx)
     elseif x >= layout.minusX and x < layout.minusX + layout.zoomWidth then
       state.zoom = math.max(1, state.zoom - 1)
       local ok, err = save()
@@ -2797,7 +2805,30 @@ function M.touch(ctx, x, y)
       and x < layout.destinationX + layout.destinationWidth then
       setDestination(ctx)
     end
+  elseif y >= 5 and y <= height - 4 and x >= 3 and x < width - 1 then
+    local mapWidth = math.max(1, width - 4)
+    local mapHeight = math.max(1, height - 8)
+    local column = x - 2
+    local row = y - 4
+    local scale = SCALES[state.zoom]
+    state.centerX = state.centerX + (column - math.floor((mapWidth + 1) / 2)) * scale
+    state.centerZ = state.centerZ + (row - math.floor((mapHeight + 1) / 2)) * scale
+    state.dragX, state.dragY = x, y
+    state.message = "Mapa desplazado."
+    local ok, err = save()
+    if not ok then state.message = "No se guardo el mapa: " .. tostring(err) end
   end
+end
+
+function M.drag(_, _, x, y)
+  if not state.dragX or not state.dragY then return end
+  local scale = SCALES[state.zoom]
+  state.centerX = state.centerX - (x - state.dragX) * scale
+  state.centerZ = state.centerZ - (y - state.dragY) * scale
+  state.dragX, state.dragY = x, y
+  state.message = "Mapa desplazado."
+  local ok, err = save()
+  if not ok then state.message = "No se guardo el mapa: " .. tostring(err) end
 end
 
 return M
