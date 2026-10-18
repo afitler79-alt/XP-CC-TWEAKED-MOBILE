@@ -316,7 +316,7 @@ local function render(ctx)
       },
       {
         { "Calculadora", "Notas", "Reloj", "Redstone", "Inventario" },
-        { "Media", "Inicio", "Apagar", "YouTube", "" },
+        { "Media", "Inicio", "Apagar", "YouTube", "Mapa" },
       },
     }
     local entries = pages[ctx.menuPage or 1]
@@ -365,7 +365,7 @@ local function isTouch(event, x, y, ctx)
         },
         {
           { "calculator", "notes", "clock", "redstone", "inventory" },
-          { "media", "home", "shutdown", "youtube", "" },
+          { "media", "home", "shutdown", "youtube", "map" },
         },
       }
       local action = pages[ctx.menuPage or 1][column][row]
@@ -988,13 +988,14 @@ local apps = {
   { "Redstone", "redstone", "RS" },
   { "Inventario", "inventory", "INV" },
   { "YouTube", "youtube", "YT" },
+  { "Mapa", "map", "MAP" },
 }
 
 local iconColors = {
   colors.blue, colors.blue, colors.orange, colors.cyan,
   colors.purple, colors.green, colors.red, colors.gray,
   colors.blue, colors.orange, colors.purple, colors.gray, colors.blue,
-  colors.red, colors.orange, colors.red,
+  colors.red, colors.orange, colors.red, colors.green,
 }
 
 local page = 1
@@ -2521,6 +2522,280 @@ function M.touch(ctx, x, y)
     local index = offset + math.floor((y - firstRow) / 2) + 1
     local item = activeItems()[index]
     if item then selectVideo(item) end
+  end
+end
+
+return M
+  ['apps/map.lua'] = [[local ui = require("sys.mobile.ui")
+local lib = require("sys.mobile.lib")
+local M = { title = "Google Maps Pocket" }
+
+local DATA_PATH = "/sys/mobile/map"
+local MAX_POINTS = 400
+local SCALES = { 1, 4, 16, 64 }
+local state = {
+  x = nil,
+  y = nil,
+  z = nil,
+  dimension = "--",
+  points = {},
+  destination = nil,
+  zoom = 2,
+  nextUpdate = 0,
+  message = "Pulsa GPS para centrar el mapa.",
+}
+
+local function save()
+  local parent = fs.getDir(DATA_PATH)
+  if not fs.exists(parent) then fs.makeDir(parent) end
+  local file, err = fs.open(DATA_PATH, "w")
+  if not file then return nil, err end
+  file.write(textutils.serialize({
+    points = state.points,
+    destination = state.destination,
+    zoom = state.zoom,
+    dimension = state.dimension,
+  }))
+  file.close()
+  return true
+end
+
+local function load()
+  if not fs.exists(DATA_PATH) then return end
+  local file, err = fs.open(DATA_PATH, "r")
+  if not file then state.message = "No se pudo leer el mapa: " .. tostring(err); return end
+  local raw = file.readAll()
+  file.close()
+  local ok, data = pcall(textutils.unserialize, raw or "")
+  if not ok or type(data) ~= "table" then
+    state.message = "No se pudieron cargar los datos del mapa."
+    return
+  end
+  if type(data.points) == "table" then
+    for _, point in ipairs(data.points) do
+      if type(point) == "table" and type(point.x) == "number" and type(point.z) == "number" then
+        state.points[#state.points + 1] = { x = point.x, z = point.z }
+        if #state.points >= MAX_POINTS then break end
+      end
+    end
+  end
+  if type(data.destination) == "table"
+    and type(data.destination.x) == "number"
+    and type(data.destination.z) == "number" then
+    state.destination = { x = data.destination.x, z = data.destination.z }
+  end
+  if type(data.zoom) == "number" and SCALES[data.zoom] then state.zoom = data.zoom end
+  if type(data.dimension) == "string" then state.dimension = data.dimension end
+end
+
+local function recordPosition(x, z)
+  local previous = state.points[#state.points]
+  if not previous or math.floor(previous.x) ~= math.floor(x)
+    or math.floor(previous.z) ~= math.floor(z) then
+    state.points[#state.points + 1] = { x = x, z = z }
+    while #state.points > MAX_POINTS do table.remove(state.points, 1) end
+    return true
+  end
+  return false
+end
+
+local function locate(ctx, timeout)
+  state.nextUpdate = os.clock() + 5
+  if not gps or type(gps.locate) ~= "function" then
+    state.message = "La API GPS no está disponible."
+    return
+  end
+  state.message = "Buscando señal GPS..."
+  local ok, x, y, z = pcall(gps.locate, timeout or 3, false)
+  if not ok then
+    state.message = "Error GPS: " .. tostring(x)
+    return
+  end
+  if type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" then
+    state.message = "Sin señal: configura 4 hosts GPS con modem."
+    return
+  end
+
+  local dimension = tostring((ctx.world and ctx.world.dimension) or "--")
+  local changedDimension = state.dimension ~= "--" and dimension ~= "--"
+    and state.dimension ~= dimension
+  if changedDimension then
+    state.points = {}
+    state.destination = nil
+    state.message = "Cambió la dimensión; historial del mapa reiniciado."
+  else
+    state.message = "Mapa centrado en tu posición."
+  end
+  state.x, state.y, state.z = x, y, z
+  state.dimension = dimension
+  local changedPosition = recordPosition(x, z)
+  if changedPosition or changedDimension then
+    local saved, err = save()
+    if not saved then state.message = "No se guardó el mapa: " .. tostring(err) end
+  end
+  state.nextUpdate = os.clock() + 5
+end
+
+local function setDestination(ctx)
+  local initial = state.destination
+    and (tostring(state.destination.x) .. " " .. tostring(state.destination.z)) or ""
+  local value = lib.prompt(ctx, "Destino X Z (vacio borra):", initial)
+  if value == nil then return end
+  if value == "" then
+    state.destination = nil
+    state.message = "Destino borrado."
+  else
+    local x, z = value:match("^%s*(-?[%d%.]+)%s*[, ]%s*(-?[%d%.]+)%s*$")
+    x, z = tonumber(x), tonumber(z)
+    if not x or not z then
+      state.message = "Coordenadas no válidas. Escribe X Z."
+      return
+    end
+    state.destination = { x = x, z = z }
+    state.message = "Destino guardado."
+  end
+  local saved, err = save()
+  if not saved then state.message = "No se guardó el mapa: " .. tostring(err) end
+end
+
+local function direction(dx, dz)
+  if dx == 0 and dz == 0 then return "aqui" end
+  local ax, az = math.abs(dx), math.abs(dz)
+  if az > ax * 2 then return dz < 0 and "N" or "S" end
+  if ax > az * 2 then return dx > 0 and "E" or "O" end
+  if dx > 0 then return dz < 0 and "NE" or "SE" end
+  return dz < 0 and "NO" or "SO"
+end
+
+local function controls(width)
+  if width < 22 then
+    return { gpsX = 2, gpsWidth = 5, minusX = 8, plusX = 11, zoomWidth = 2,
+      destinationX = 14, destinationWidth = math.max(1, width - 14) }
+  end
+  return { gpsX = 2, gpsWidth = 6, minusX = 9, plusX = 13, zoomWidth = 3,
+    destinationX = 17, destinationWidth = math.min(9, width - 16) }
+end
+
+local function drawMap(width, top, bottom)
+  local mapWidth = math.max(1, width - 4)
+  local mapHeight = math.max(1, bottom - top + 1)
+  local centerColumn = math.floor((mapWidth + 1) / 2)
+  local centerRow = math.floor((mapHeight + 1) / 2)
+  local scale = SCALES[state.zoom]
+
+  for row = 1, mapHeight do
+    local line = {}
+    for column = 1, mapWidth do
+      line[column] = (row == centerRow or column == centerColumn) and "+" or " "
+    end
+
+    local function plot(x, z, marker)
+      if not state.x then return end
+      local column = centerColumn + math.floor((x - state.x) / scale + 0.5)
+      local row = centerRow + math.floor((z - state.z) / scale + 0.5)
+      if column >= 1 and column <= mapWidth and row >= 1 and row <= mapHeight then
+        line[column] = marker
+      end
+    end
+
+    for _, point in ipairs(state.points) do plot(point.x, point.z, "o") end
+    if state.destination then plot(state.destination.x, state.destination.z, "X") end
+    if state.x then plot(state.x, state.z, "@") end
+
+    term.setCursorPos(3, top + row - 1)
+    for column = 1, mapWidth do
+      local marker = line[column]
+      if marker == "@" then
+        term.setTextColor(colors.white)
+        term.setBackgroundColor(colors.blue)
+      elseif marker == "X" then
+        term.setTextColor(colors.white)
+        term.setBackgroundColor(colors.red)
+      elseif marker == "+" then
+        term.setTextColor(colors.gray)
+        term.setBackgroundColor(colors.lightGray)
+      elseif marker == "o" then
+        term.setTextColor(colors.green)
+        term.setBackgroundColor(colors.white)
+      else
+        term.setTextColor(colors.lightGray)
+        term.setBackgroundColor(colors.white)
+      end
+      term.write(marker)
+    end
+  end
+  term.setBackgroundColor(colors.white)
+end
+
+function M.open(ctx)
+  state.x, state.y, state.z = nil, nil, nil
+  state.points = {}
+  state.destination = nil
+  state.zoom = 2
+  state.dimension = "--"
+  load()
+  if state.dimension == "--" and ctx.world then
+    state.dimension = tostring(ctx.world.dimension or "--")
+  end
+  state.nextUpdate = os.clock() + 2
+end
+
+function M.tick(ctx)
+  if os.clock() >= state.nextUpdate then locate(ctx, 1) end
+end
+
+function M.draw(ctx)
+  local width, height = term.getSize()
+  local layout = controls(width)
+  ui.button(layout.gpsX, 3, layout.gpsWidth, "GPS", colors.green, colors.black)
+  ui.button(layout.minusX, 3, layout.zoomWidth, "-", colors.lightBlue)
+  ui.button(layout.plusX, 3, layout.zoomWidth, "+", colors.lightBlue)
+  ui.button(layout.destinationX, 3, layout.destinationWidth,
+    width < 22 and "Dst" or "Destino", colors.blue)
+
+  local mapTop = 5
+  local footer = height - 3
+  ui.text(2, 4, "N ^ " .. state.dimension:gsub("^minecraft:", ""),
+    colors.blue, colors.white, width - 2)
+  drawMap(width, mapTop, math.max(mapTop, footer - 1))
+
+  if state.x then
+    ui.text(2, footer, string.format("X %.0f Y %.0f Z %.0f  1:%d",
+      state.x, state.y, state.z, SCALES[state.zoom]), colors.black, colors.white, width - 2)
+  else
+    ui.text(2, footer, "Sin posicion GPS  |  1:" .. SCALES[state.zoom],
+      colors.gray, colors.white, width - 2)
+  end
+  if state.destination and state.x then
+    local dx, dz = state.destination.x - state.x, state.destination.z - state.z
+    local distance = math.floor(math.sqrt(dx * dx + dz * dz) + 0.5)
+    ui.text(2, footer + 1, "Destino: " .. distance .. "m " .. direction(dx, dz),
+      colors.red, colors.white, width - 2)
+    ui.text(2, footer + 2, state.message, colors.gray, colors.white, width - 2)
+  else
+    ui.text(2, footer + 1, state.message, colors.gray, colors.white, width - 2)
+  end
+end
+
+function M.touch(ctx, x, y)
+  local width = term.getSize()
+  if y == 3 then
+    local layout = controls(width)
+    if x >= layout.gpsX and x < layout.gpsX + layout.gpsWidth then
+      locate(ctx)
+      if state.x and ctx.playSound then ctx.playSound("action") end
+    elseif x >= layout.minusX and x < layout.minusX + layout.zoomWidth then
+      state.zoom = math.max(1, state.zoom - 1)
+      local ok, err = save()
+      if not ok then state.message = "No se guardó el zoom: " .. tostring(err) end
+    elseif x >= layout.plusX and x < layout.plusX + layout.zoomWidth then
+      state.zoom = math.min(#SCALES, state.zoom + 1)
+      local ok, err = save()
+      if not ok then state.message = "No se guardó el zoom: " .. tostring(err) end
+    elseif x >= layout.destinationX
+      and x < layout.destinationX + layout.destinationWidth then
+      setDestination(ctx)
+    end
   end
 end
 
