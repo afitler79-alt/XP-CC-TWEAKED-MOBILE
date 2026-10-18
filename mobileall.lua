@@ -316,7 +316,7 @@ local function render(ctx)
       },
       {
         { "Calculadora", "Notas", "Reloj", "Redstone", "Inventario" },
-        { "Media", "Inicio", "Apagar", "", "" },
+        { "Media", "Inicio", "Apagar", "YouTube", "" },
       },
     }
     local entries = pages[ctx.menuPage or 1]
@@ -365,7 +365,7 @@ local function isTouch(event, x, y, ctx)
         },
         {
           { "calculator", "notes", "clock", "redstone", "inventory" },
-          { "media", "home", "shutdown", "", "" },
+          { "media", "home", "shutdown", "youtube", "" },
         },
       }
       local action = pages[ctx.menuPage or 1][column][row]
@@ -987,13 +987,14 @@ local apps = {
   { "Reloj", "clock", "TIME" },
   { "Redstone", "redstone", "RS" },
   { "Inventario", "inventory", "INV" },
+  { "YouTube", "youtube", "YT" },
 }
 
 local iconColors = {
   colors.blue, colors.blue, colors.orange, colors.cyan,
   colors.purple, colors.green, colors.red, colors.gray,
   colors.blue, colors.orange, colors.purple, colors.gray, colors.blue,
-  colors.red, colors.orange,
+  colors.red, colors.orange, colors.red,
 }
 
 local page = 1
@@ -2213,6 +2214,313 @@ function M.touch(_, x, y)
     state.scroll = math.max(0, state.scroll - 5)
   elseif y == h - 2 then
     state.scroll = math.min(math.max(0, #state.items - 1), state.scroll + 5)
+  end
+end
+
+return M
+]],
+  ['apps/youtube.lua'] = [[local ui = require("sys.mobile.ui")
+local lib = require("sys.mobile.lib")
+local M = { title = "YouTube Terminal" }
+
+local DATA_PATH = "/sys/mobile/youtube"
+local MAX_RESPONSE = 65536
+local MAX_ITEMS = 40
+local state = {
+  mode = "results",
+  query = "",
+  results = {},
+  saved = {},
+  history = {},
+  selected = nil,
+  returnMode = "results",
+  page = 1,
+  message = "Busca videos. Requiere HTTP y un servidor Invidious disponible.",
+}
+
+local function loadData()
+  if not fs.exists(DATA_PATH) then return end
+  local file, err = fs.open(DATA_PATH, "r")
+  if not file then state.message = "No se pudo leer favoritos: " .. tostring(err); return end
+  local raw = file.readAll()
+  file.close()
+  local ok, data = pcall(textutils.unserialize, raw or "")
+  if not ok or type(data) ~= "table" then
+    state.message = "No se pudieron cargar favoritos e historial."
+    return
+  end
+  if type(data.saved) == "table" then state.saved = data.saved end
+  if type(data.history) == "table" then state.history = data.history end
+end
+
+local function saveData()
+  local parent = fs.getDir(DATA_PATH)
+  if not fs.exists(parent) then fs.makeDir(parent) end
+  local file, err = fs.open(DATA_PATH, "w")
+  if not file then return nil, err end
+  file.write(textutils.serialize({ saved = state.saved, history = state.history }))
+  file.close()
+  return true
+end
+
+local function readResponse(url, limit)
+  if not http or type(http.get) ~= "function" then
+    return nil, "HTTP no está habilitado en CraftOS."
+  end
+  local ok, response, reason = pcall(http.get, url, {
+    ["User-Agent"] = "XP-Pocket-Mobile/1.0",
+    ["Accept"] = "application/json",
+  })
+  if not ok or not response then
+    return nil, "No se pudo conectar: " .. tostring(ok and reason or response)
+  end
+
+  local codeOk, code = pcall(function()
+    if response.getResponseCode then return response.getResponseCode() end
+  end)
+  if codeOk and type(code) == "number" and code >= 400 then
+    pcall(response.close)
+    return nil, "El servidor respondió HTTP " .. code .. "."
+  end
+
+  local chunks, size = {}, 0
+  local readOk, readError = pcall(function()
+    while size <= limit do
+      local chunk = response.read(math.min(4096, limit + 1 - size))
+      if not chunk or chunk == "" then break end
+      chunks[#chunks + 1] = chunk
+      size = size + #chunk
+    end
+  end)
+  pcall(response.close)
+  if not readOk then return nil, "Error leyendo la respuesta: " .. tostring(readError) end
+  if size > limit then return nil, "La respuesta supera el límite de tamaño." end
+  return table.concat(chunks)
+end
+
+local function decodeJson(raw)
+  local ok, result = pcall(textutils.unserializeJSON, raw or "")
+  if not ok or type(result) ~= "table" then
+    return nil, "El servidor devolvió JSON no válido."
+  end
+  return result
+end
+
+local function encode(value)
+  return (tostring(value):gsub("([^%w%-_%.~])", function(char)
+    return string.format("%%%02X", string.byte(char))
+  end))
+end
+
+local function findInstances()
+  local raw, err = readResponse("https://api.invidious.io/instances.json?sort_by=api", 32768)
+  if not raw then return nil, err end
+  local instances, decodeError = decodeJson(raw)
+  if not instances then return nil, decodeError end
+
+  local available = {}
+  for _, entry in ipairs(instances) do
+    local details = type(entry) == "table" and entry[2]
+    local uri = type(details) == "table" and details.uri
+    if type(uri) == "string" and uri:match("^https://")
+      and details.api == true and details.type == "https" then
+      available[#available + 1] = uri:gsub("/+$", "")
+      if #available >= 3 then break end
+    end
+  end
+  if #available == 0 then
+    return nil, "No se encontró un servidor HTTPS con API disponible."
+  end
+  return available
+end
+
+local function normalizeVideo(video)
+  if type(video) ~= "table" or type(video.videoId) ~= "string"
+    or not video.videoId:match("^[%w_-]+$")
+    or type(video.title) ~= "string" then
+    return nil
+  end
+  local title = video.title:gsub("[%c]", " "):gsub("%s+", " ")
+  local author = tostring(video.author or "Canal desconocido"):gsub("[%c]", " "):gsub("%s+", " ")
+  return {
+    videoId = video.videoId,
+    title = title,
+    author = author,
+    duration = tostring(video.lengthSeconds or "--"),
+    views = tostring(video.viewCount or "--"),
+    published = tostring(video.publishedText or ""),
+  }
+end
+
+local function search(query, page)
+  state.query = query
+  state.mode, state.selected = "results", nil
+  state.page = page or 1
+  state.results = {}
+  state.message = "Buscando..."
+
+  local instances, instanceError = findInstances()
+  if not instances then state.message = instanceError; return end
+  local lastError
+  for _, instance in ipairs(instances) do
+    local url = instance .. "/api/v1/search?q=" .. encode(query) .. "&type=video&page=" .. state.page
+    local raw, requestError = readResponse(url, MAX_RESPONSE)
+    if raw then
+      local response, decodeError = decodeJson(raw)
+      if response and type(response.error) ~= "string" then
+        for _, item in ipairs(response) do
+          local video = normalizeVideo(item)
+          if video then state.results[#state.results + 1] = video end
+        end
+        state.message = #state.results > 0
+          and ("Resultados: " .. #state.results .. " | Fuente: Invidious")
+          or "No se encontraron videos."
+        return
+      end
+      lastError = response and response.error or decodeError
+    else
+      lastError = requestError
+    end
+  end
+  state.message = lastError or "No se pudo completar la búsqueda."
+end
+
+local function activeItems()
+  if state.mode == "saved" then return state.saved end
+  if state.mode == "history" then return state.history end
+  return state.results
+end
+
+local function remember(video)
+  for index = #state.history, 1, -1 do
+    if state.history[index].videoId == video.videoId then
+      table.remove(state.history, index)
+    end
+  end
+  table.insert(state.history, 1, video)
+  while #state.history > MAX_ITEMS do table.remove(state.history) end
+  local ok, err = saveData()
+  if not ok then state.message = "No se guardó el historial: " .. tostring(err) end
+end
+
+local function openSearch(ctx)
+  local query = lib.prompt(ctx, "Buscar en YouTube:", state.query)
+  if query and query:match("%S") then search(query) end
+end
+
+local function selectVideo(video)
+  state.returnMode = state.mode
+  state.selected = video
+  state.mode = "detail"
+  remember(video)
+end
+
+function M.open()
+  loadData()
+end
+
+function M.draw()
+  local width, height = term.getSize()
+  ui.button(2, 3, 7, "Buscar", colors.red)
+  ui.button(10, 3, 8, "Favoritos", colors.lightBlue)
+  ui.button(19, 3, 8, "Historial", colors.lightBlue)
+  ui.fill(1, 4, width, 1, colors.gray)
+  ui.text(2, 4, state.message, colors.white, colors.gray, width - 2)
+
+  if state.mode == "detail" and state.selected then
+    local video = state.selected
+    ui.button(2, 5, 7, "Lista", colors.blue)
+    ui.button(10, 5, 8, "Guardar", colors.green, colors.black)
+    ui.text(2, 7, video.title, colors.blue, colors.white, width - 2)
+    ui.text(2, 9, "Canal: " .. video.author, colors.black, colors.white, width - 2)
+    ui.text(2, 10, "Duracion: " .. video.duration .. " s", colors.black, colors.white, width - 2)
+    ui.text(2, 11, "Vistas: " .. video.views, colors.black, colors.white, width - 2)
+    ui.text(2, 13, "youtu.be/" .. video.videoId, colors.blue, colors.white, width - 2)
+    ui.text(2, 15, "CraftOS no reproduce video;", colors.red, colors.white, width - 2)
+    ui.text(2, 16, "abre el enlace externamente.", colors.red, colors.white, width - 2)
+    return
+  end
+
+  local items = activeItems()
+  local firstRow, lastRow = 6, height - 3
+  local visible = math.max(0, lastRow - firstRow + 1)
+  local pageSize = math.max(1, math.floor(visible / 2))
+  local offset = state.mode == "results" and 0 or (state.page - 1) * pageSize
+  for itemIndex = 1, pageSize do
+    local item = items[offset + itemIndex]
+    if item then
+      local y = firstRow + (itemIndex - 1) * 2
+      local marker = state.mode == "results" and tostring(offset + itemIndex) or ">"
+      ui.text(2, y, marker .. " " .. item.title, colors.blue, colors.white, width - 2)
+      ui.fill(2, y + 1, math.max(1, width - 3), 1, colors.lightGray)
+      ui.text(3, y + 1, item.author .. " | " .. item.duration .. " s",
+        colors.gray, colors.lightGray, width - 4)
+    end
+  end
+  if visible > 0 then
+    ui.button(2, height - 1, 8, "< Atras", colors.lightBlue)
+    ui.button(math.max(11, width - 9), height - 1, 8, "Mas >", colors.lightBlue)
+  end
+end
+
+function M.touch(ctx, x, y)
+  local width, height = term.getSize()
+  if y == 3 then
+    if x < 10 then openSearch(ctx)
+    elseif x < 19 then
+      state.mode, state.page, state.selected = "saved", 1, nil
+      state.message = #state.saved .. " videos guardados."
+    else
+      state.mode, state.page, state.selected = "history", 1, nil
+      state.message = #state.history .. " videos en el historial."
+    end
+    return
+  end
+
+  if state.mode == "detail" and state.selected then
+    if y == 5 and x < 10 then
+      state.mode, state.selected = state.returnMode, nil
+    elseif y == 5 and x < 19 then
+      local exists = false
+      for _, item in ipairs(state.saved) do
+        if item.videoId == state.selected.videoId then exists = true; break end
+      end
+      if not exists then
+        table.insert(state.saved, 1, state.selected)
+        while #state.saved > MAX_ITEMS do table.remove(state.saved) end
+      end
+      local ok, err = saveData()
+      state.message = ok and "Video guardado en favoritos."
+        or ("No se guardó: " .. tostring(err))
+    end
+    return
+  end
+
+  if y == height - 1 then
+    if x < 11 then
+      if state.mode == "results" and state.page > 1 then
+        search(state.query, state.page - 1)
+      else
+        state.page = math.max(1, state.page - 1)
+      end
+    elseif state.mode == "results" and state.query ~= "" then
+      search(state.query, state.page + 1)
+    else
+      local visible = math.max(1, height - 8)
+      local pageSize = math.max(1, math.floor(visible / 2))
+      if state.page * pageSize < #activeItems() then state.page = state.page + 1 end
+    end
+    return
+  end
+
+  local firstRow, lastRow = 6, height - 3
+  if y >= firstRow and y <= lastRow then
+    local visible = math.max(1, lastRow - firstRow + 1)
+    local pageSize = math.max(1, math.floor(visible / 2))
+    local offset = state.mode == "results" and 0 or (state.page - 1) * pageSize
+    local index = offset + math.floor((y - firstRow) / 2) + 1
+    local item = activeItems()[index]
+    if item then selectVideo(item) end
   end
 end
 
